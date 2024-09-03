@@ -299,12 +299,12 @@ class Trainer():
         self.gscaler.update()
       #cdj
       if self.world_rank == 0 and self.params.log_to_screen:
-        if self.iters % 10 == 0:
+        if self.iters % 500 == 0:
           logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
           
       #cdj for debug
-      if self.iters > 10: 
-        break
+      # if self.iters > 10: 
+        # break
         
       tr_time += time.time() - tr_start
     
@@ -325,7 +325,7 @@ class Trainer():
 
   def validate_one_epoch(self):
     self.model.eval()
-    n_valid_batches = 20 #do validation on first 20 images, just for LR scheduler
+    n_valid_batches = 100 #do validation on first 20 images, just for LR scheduler
     if self.params.normalization == 'minmax':
         raise Exception("minmax normalization not supported")
     elif self.params.normalization == 'zscore':
@@ -341,7 +341,7 @@ class Trainer():
     valid_start = time.time()
 
     # sample_idx = np.random.randint(len(self.valid_data_loader))
-    sample_idx = 0 #cdj plot first image
+    sample_idx = np.random.randint(n_valid_batches) #cdj 
     with torch.no_grad():
       for i, data in enumerate(self.valid_data_loader, 0):
         # if (not self.precip) and i>=n_valid_batches:
