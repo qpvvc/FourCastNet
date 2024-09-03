@@ -340,7 +340,8 @@ class Trainer():
 
     valid_start = time.time()
 
-    sample_idx = np.random.randint(len(self.valid_data_loader))
+    # sample_idx = np.random.randint(len(self.valid_data_loader))
+    sample_idx = 0 #cdj plot first image
     with torch.no_grad():
       for i, data in enumerate(self.valid_data_loader, 0):
         # if (not self.precip) and i>=n_valid_batches:
@@ -407,7 +408,7 @@ class Trainer():
         #cdj 
         if self.world_rank == 0 and self.params.log_to_screen:
           if valid_steps % 10 == 0:
-            logging.info('Valid Iter: {}, Loss: {}'.format(i, valid_loss/valid_steps))
+            logging.info('Valid Iter: {}, Loss: {}'.format(valid_steps, valid_loss/valid_steps))
            
     if dist.is_initialized():
       dist.all_reduce(valid_buff)
