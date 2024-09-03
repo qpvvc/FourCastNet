@@ -234,10 +234,10 @@ class Trainer():
 
       if self.params.log_to_screen:
         logging.info('Time taken for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
-        #logging.info('train data time={}, train step time={}, valid step time={}'.format(data_time, tr_time, valid_time))
+        logging.info('train data time={}, train step time={}, valid step time={}'.format(data_time, tr_time, valid_time))
         logging.info('Train loss: {}. Valid loss: {}'.format(train_logs['loss'], valid_logs['valid_loss']))
-#        if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
-#          logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
+      if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
+         logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
 
 
 
@@ -297,7 +297,11 @@ class Trainer():
 
       if self.params.enable_amp:
         self.gscaler.update()
-
+      #cdj
+      if self.world_rank == 0 and self.params.log_to_screen:
+        if self.iters % 10 == 0:
+          logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
+      
       tr_time += time.time() - tr_start
     
     try:
@@ -395,7 +399,10 @@ class Trainer():
                 save_image(torch.cat((gen_step_one[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
             else:
                 save_image(torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
-
+        #cdj 
+        if self.world_rank == 0 and self.params.log_to_screen:
+          if valid_steps % 1 == 0:
+            logging.info('Valid Iter: {}, Loss: {}'.format(i, valid_loss/valid_steps))
            
     if dist.is_initialized():
       dist.all_reduce(valid_buff)
