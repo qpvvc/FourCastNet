@@ -299,12 +299,12 @@ class Trainer():
         self.gscaler.update()
       #cdj
       if self.world_rank == 0 and self.params.log_to_screen:
-        if self.iters % 100 == 0:
+        if self.iters % 10 == 0:
           logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
           
       #cdj for debug
-      # if self.iters > 10: 
-        # break
+      if self.iters > 10: 
+        break
         
       tr_time += time.time() - tr_start
     
