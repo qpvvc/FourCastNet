@@ -97,7 +97,7 @@ class GetDataset(Dataset):
     self.add_noise = params.add_noise if train else False
 
     if self.precip:
-        path = params.precip+'/train' if train else params.precip+'/test'
+        path = params.precip+'/train_temp' if train else params.precip+'/test'
         self.precip_paths = glob.glob(path + "/*.h5")
         self.precip_paths.sort()
 

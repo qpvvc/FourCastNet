@@ -62,23 +62,17 @@ from collections import OrderedDict
 from torch.nn.parallel import DistributedDataParallel
 import logging
 from utils import logging_utils
-from utils.weighted_acc_rmse import weighted_rmse_torch_channels, weighted_acc_torch_channels, unweighted_acc_torch_channels, weighted_acc_masked_torch_channels
+from utils.weighted_acc_rmse import weighted_rmse_torch_channels, weighted_acc_torch_channels, unlog_tp_torch, top_quantiles_error_torch
 logging_utils.config_logger()
 from utils.YParams import YParams
 from utils.data_loader_multifiles import get_data_loader
-from networks.afnonet import AFNONet
+from networks.afnonet import AFNONet, PrecipNet
 import wandb
 import matplotlib.pyplot as plt
 import glob
 from datetime import datetime
 
-
-fld = "z500" # diff flds have diff decor times and hence differnt ics
-if fld == "z500" or fld == "2m_temperature" or fld == "t850":
-    DECORRELATION_TIME = 36 # 9 days (36) for z500, 2 (8 steps) days for u10, v10
-else:
-    DECORRELATION_TIME = 8 # 9 days (36) for z500, 2 (8 steps) days for u10, v10
-idxes = {"u10":0, "z500":14, "2m_temperature":2, "v10":1, "t850":5}
+DECORRELATION_TIME = 8 # 2 days for preicp
 
 def gaussian_perturb(x, level=0.01, device=0):
     noise = level * torch.randn(x.shape).to(device, dtype=torch.float)
@@ -112,13 +106,12 @@ def setup(params):
     params.img_shape_x = img_shape_x
     params.img_shape_y = img_shape_y
     if params.log_to_screen:
-        logging.info('Loading trained model checkpoint from {}'.format(params['best_checkpoint_path']))
+      logging.info('Loading trained model checkpoint from {}'.format(params['best_checkpoint_path']))
 
     in_channels = np.array(params.in_channels)
-    out_channels = np.array(params.out_channels)
+    out_channels = np.array(params.in_channels)# for the backbone model, will be reset later
     n_in_channels = len(in_channels)
-    n_out_channels = len(out_channels)
-    
+    n_out_channels = len(out_channels)     
     if params["orography"]:
       params['N_in_channels'] = n_in_channels + 1
     else:
@@ -127,12 +120,24 @@ def setup(params):
     params.means = np.load(params.global_means_path)[0, out_channels] # needed to standardize wind data
     params.stds = np.load(params.global_stds_path)[0, out_channels]
 
+    # load wind model
+    if params.nettype_wind == 'afno':
+      model_wind = AFNONet(params).to(device) 
+    if 'model_wind_path' not in params:
+      raise Exception("no backbone model weights specified")
+    checkpoint_file  = params['model_wind_path']
+    model_wind = load_model(model_wind, params, checkpoint_file)
+    model_wind = model_wind.to(device)
+
+    # reset channels for precip
+    params['N_out_channels'] = len(params['out_channels'])
     # load the model
     if params.nettype == 'afno':
       model = AFNONet(params).to(device) 
     else:
       raise Exception("not implemented")
 
+    model = PrecipNet(params, backbone=model).to(device)
     checkpoint_file  = params['best_checkpoint_path']
     model = load_model(model, params, checkpoint_file)
     model = model.to(device)
@@ -143,14 +148,23 @@ def setup(params):
     # which year
     yr = 0
     if params.log_to_screen:
-        logging.info('Loading inference data')
-        logging.info('Inference data from {}'.format(files_paths[yr]))
+        logging.info('Loading validation data')
+        logging.info('Validation data from {}'.format(files_paths[yr]))
 
     valid_data_full = h5py.File(files_paths[yr], 'r')['fields']
 
-    return valid_data_full, model
+    # precip paths
+    path = params.precip + '/out_of_sample'
+    precip_paths = glob.glob(path + "/*.h5")
+    precip_paths.sort()
+    if params.log_to_screen:
+      logging.info('Loading validation precip data')
+      logging.info('Validation data from {}'.format(precip_paths[0]))
+    valid_data_tp_full = h5py.File(precip_paths[0], 'r')['tp']
+    return valid_data_full, valid_data_tp_full, model_wind, model
 
-def autoregressive_inference(params, ic, valid_data_full, model): 
+
+def autoregressive_inference(params, ic, valid_data_full, valid_data_tp_full, model_wind, model):
     ic = int(ic) 
     #initialize global variables
     device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
@@ -167,43 +181,34 @@ def autoregressive_inference(params, ic, valid_data_full, model):
     means = params.means
     stds = params.stds
 
-    #initialize memory for image sequences and RMSE/ACC
+    #initialize memory for image sequences and RMSE/ACC, tqe for precip
     valid_loss = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
     acc = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-
-    # compute metrics in a coarse resolution too if params.interp is nonzero
-    valid_loss_coarse = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-    acc_coarse = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-    acc_coarse_unweighted = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-    
     acc_unweighted = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
+    tqe = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
+ 
+    # wind seqs
     seq_real = torch.zeros((prediction_length, n_in_channels, img_shape_x, img_shape_y)).to(device, dtype=torch.float)
     seq_pred = torch.zeros((prediction_length, n_in_channels, img_shape_x, img_shape_y)).to(device, dtype=torch.float)
-
-    acc_land = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-    acc_sea = torch.zeros((prediction_length, n_out_channels)).to(device, dtype=torch.float)
-    if params.masked_acc:
-      maskarray = torch.as_tensor(np.load(params.maskpath)[0:720]).to(device, dtype=torch.float)
+    # precip sequences
+    seq_real_tp = torch.zeros((prediction_length, n_out_channels, img_shape_x, img_shape_y)).to(device, dtype=torch.float)
+    seq_pred_tp = torch.zeros((prediction_length, n_out_channels, img_shape_x, img_shape_y)).to(device, dtype=torch.float)
 
     valid_data = valid_data_full[ic:(ic+prediction_length*dt+n_history*dt):dt, in_channels, 0:720] #extract valid data from first year
     # standardize
     valid_data = (valid_data - means)/stds
     valid_data = torch.as_tensor(valid_data).to(device, dtype=torch.float)
 
-    #load time means
-    if not params.use_daily_climatology:
-      m = torch.as_tensor((np.load(params.time_means_path)[0][out_channels] - means)/stds)[:, 0:img_shape_x] # climatology
-      m = torch.unsqueeze(m, 0)
-    else:
-      # use daily clim like weyn et al. (different from rasp)
-      dc_path = params.dc_path
-      with h5py.File(dc_path, 'r') as f:
-        dc = f['time_means_daily'][ic:ic+prediction_length*dt:dt] # 1460,21,721,1440
-      m = torch.as_tensor((dc[:,out_channels,0:img_shape_x,:] - means)/stds) 
+    len_ic = prediction_length*dt
+    valid_data_tp = valid_data_tp_full[ic:(ic+prediction_length*dt):dt, 0:720].reshape(len_ic,n_out_channels,720,img_shape_y) #extract valid data from first year
+    # log normalize
+    eps = params.precip_eps
+    valid_data_tp = np.log1p(valid_data_tp/eps)
+    valid_data_tp = torch.as_tensor(valid_data_tp).to(device, dtype=torch.float)
 
+    m = torch.as_tensor(np.load(params.time_means_path_tp)[0][out_channels])[:, 0:img_shape_x] # climatology
+    m = torch.unsqueeze(m, 0)
     m = m.to(device, dtype=torch.float)
-    if params.interp > 0:
-        m_coarse = downsample(m, scale=params.interp)
 
     std = torch.as_tensor(stds[:,0,0]).to(device, dtype=torch.float)
 
@@ -221,99 +226,73 @@ def autoregressive_inference(params, ic, valid_data_full, model):
       for i in range(valid_data.shape[0]): 
         if i==0: #start of sequence
           first = valid_data[0:n_history+1]
+          first_tp = valid_data_tp[0:1]
           future = valid_data[n_history+1]
+          future_tp = valid_data_tp[1]
           for h in range(n_history+1):
-            seq_real[h] = first[h*n_in_channels : (h+1)*n_in_channels][0:n_out_channels] #extract history from 1st 
+            seq_real[h] = first[h*n_in_channels:(h+1)*n_in_channels][0:n_in_channels] #extract history from 1st 
             seq_pred[h] = seq_real[h]
+          seq_real_tp[0] = unlog_tp_torch(first_tp)
+          seq_pred_tp[0] = unlog_tp_torch(first_tp)
           if params.perturb:
             first = gaussian_perturb(first, level=params.n_level, device=device) # perturb the ic
           if orography:
-            future_pred = model(torch.cat((first, orog), axis=1))
+            future_pred = model_wind(torch.cat((first, orog), axis=1))
           else:
-            future_pred = model(first)
+            future_pred = model_wind(first)
+          future_pred_tp = model(future_pred)
         else:
           if i < prediction_length-1:
             future = valid_data[n_history+i+1]
+            future_tp = valid_data_tp[i+1]
           if orography:
-            future_pred = model(torch.cat((future_pred, orog), axis=1)) #autoregressive step
+            future_pred = model_wind(torch.cat((future_pred, orog), axis=1)) #autoregressive step
           else:
-            future_pred = model(future_pred) #autoregressive step
+            future_pred = model_wind(future_pred) #autoregressive step
+          future_pred_tp = model(future_pred) # tp diagnosis
 
         if i < prediction_length-1: #not on the last step
           seq_pred[n_history+i+1] = future_pred
           seq_real[n_history+i+1] = future
+          seq_pred_tp[i+1] = unlog_tp_torch(future_pred_tp) # this predicts 6-12 precip: 0 -> 6 (afno) -> 6-12 precip 
+          seq_real_tp[i+1] = unlog_tp_torch(future_tp) # which is the i+1th validation data
+          #collect history
           history_stack = seq_pred[i+1:i+2+n_history]
 
+        # ic for next wind step
         future_pred = history_stack
       
-        #Compute metrics 
-        if params.use_daily_climatology:
-            clim = m[i:i+1]
-            if params.interp > 0:
-                clim_coarse = m_coarse[i:i+1]
-        else:
-            clim = m
-            if params.interp > 0:
-                clim_coarse = m_coarse
-
-        pred = torch.unsqueeze(seq_pred[i], 0)
-        tar = torch.unsqueeze(seq_real[i], 0)
-        valid_loss[i] = weighted_rmse_torch_channels(pred, tar) * std
-        acc[i] = weighted_acc_torch_channels(pred-clim, tar-clim)
-        acc_unweighted[i] = unweighted_acc_torch_channels(pred-clim, tar-clim)
-
-        if params.masked_acc:
-          acc_land[i] = weighted_acc_masked_torch_channels(pred-clim, tar-clim, maskarray)
-          acc_sea[i] = weighted_acc_masked_torch_channels(pred-clim, tar-clim, 1-maskarray)
-
-        if params.interp > 0:
-            pred = downsample(pred, scale=params.interp)
-            tar = downsample(tar, scale=params.interp)
-            valid_loss_coarse[i] = weighted_rmse_torch_channels(pred, tar) * std
-            acc_coarse[i] = weighted_acc_torch_channels(pred-clim_coarse, tar-clim_coarse)
-            acc_coarse_unweighted[i] = unweighted_acc_torch_channels(pred-clim_coarse, tar-clim_coarse)
-
+        pred = torch.unsqueeze(seq_pred_tp[i], 0)
+        tar = torch.unsqueeze(seq_real_tp[i], 0)
+        valid_loss[i] = weighted_rmse_torch_channels(pred, tar)
+        acc[i] = weighted_acc_torch_channels(pred-m, tar-m)
+        tqe[i] = top_quantiles_error_torch(pred, tar)
+        
         if params.log_to_screen:
-          idx = idxes[fld] 
-          logging.info('Predicted timestep {} of {}. {} RMS Error: {}, ACC: {}'.format(i, prediction_length, fld, valid_loss[i, idx], acc[i, idx]))
-          if params.interp > 0:
-            logging.info('[COARSE] Predicted timestep {} of {}. {} RMS Error: {}, ACC: {}'.format(i, prediction_length, fld, valid_loss_coarse[i, idx],
-                        acc_coarse[i, idx]))
+          logging.info('Timestep {} of {}. TP RMS Error: {}, ACC: {}'.format((i), prediction_length, valid_loss[i,0], acc[i,0]))
 
-    seq_real = seq_real.cpu().numpy()
-    seq_pred = seq_pred.cpu().numpy()
+    seq_real_tp = seq_real_tp.cpu().numpy()
+    seq_pred_tp = seq_pred_tp.cpu().numpy()
     valid_loss = valid_loss.cpu().numpy()
     acc = acc.cpu().numpy()
     acc_unweighted = acc_unweighted.cpu().numpy()
-    acc_coarse = acc_coarse.cpu().numpy()
-    acc_coarse_unweighted = acc_coarse_unweighted.cpu().numpy()
-    valid_loss_coarse = valid_loss_coarse.cpu().numpy()
-    acc_land = acc_land.cpu().numpy()
-    acc_sea = acc_sea.cpu().numpy()
-
-    return (np.expand_dims(seq_real[n_history:], 0), np.expand_dims(seq_pred[n_history:], 0), np.expand_dims(valid_loss,0), np.expand_dims(acc, 0),
-           np.expand_dims(acc_unweighted, 0), np.expand_dims(valid_loss_coarse, 0), np.expand_dims(acc_coarse, 0),
-           np.expand_dims(acc_coarse_unweighted, 0),
-           np.expand_dims(acc_land, 0),
-           np.expand_dims(acc_sea, 0))
+    tqe = tqe.cpu().numpy()
+    return np.expand_dims(seq_real_tp, 0), np.expand_dims(seq_pred_tp, 0), np.expand_dims(valid_loss, 0), \
+           np.expand_dims(acc, 0), np.expand_dims(acc_unweighted, 0), np.expand_dims(tqe, 0)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_num", default='00', type=str)
     parser.add_argument("--yaml_config", default='../config/AFNO_1.yaml', type=str)
-    parser.add_argument("--config", default='afno_backbone', type=str)
-    parser.add_argument("--use_daily_climatology", action='store_true')
+    parser.add_argument("--config", default='full_field', type=str)
     parser.add_argument("--vis", action='store_true')
     parser.add_argument("--override_dir", default=None, type = str, help = 'Path to store inference outputs; must also set --weights arg')
-    parser.add_argument("--interp", default=0, type=float)
     parser.add_argument("--weights", default=None, type=str, help = 'Path to model weights, for use with override_dir option')
     
     args = parser.parse_args()
     params = YParams(os.path.abspath(args.yaml_config), args.config)
     params['world_size'] = 1
-    params['interp'] = args.interp
-    params['use_daily_climatology'] = args.use_daily_climatology
     params['global_batch_size'] = params.batch_size
 
     torch.cuda.set_device(0)
@@ -341,11 +320,9 @@ if __name__ == '__main__':
     params.log()
 
     n_ics = params['n_initial_conditions']
+    ics = [1066, 1050, 1034]
 
-    if fld == "z500" or fld == "t850":
-        n_samples_per_year = 1336
-    else:
-        n_samples_per_year = 1460
+    n_samples_per_year = 1460
 
     if params["ics_type"] == 'default':
         num_samples = n_samples_per_year-params.prediction_length
@@ -381,54 +358,40 @@ if __name__ == '__main__':
     except:
       autoregressive_inference_filetag = ""
 
-    if params.interp > 0:
-        autoregressive_inference_filetag = "_coarse"
 
-    autoregressive_inference_filetag += "_" + fld + ""
-    if vis:
-        autoregressive_inference_filetag += "_vis"
+    autoregressive_inference_filetag += "_tp"
     # get data and models
-    valid_data_full, model = setup(params)
+    valid_data_full, valid_data_tp_full, model_wind, model = setup(params)
 
     #initialize lists for image sequences and RMSE/ACC
-    valid_loss = []
-    valid_loss_coarse = []
+    valid_loss = np.zeros
     acc_unweighted = []
     acc = []
-    acc_coarse = []
-    acc_coarse_unweighted = []
+    tqe = []
     seq_pred = []
     seq_real = []
-    acc_land = []
-    acc_sea = []
 
     #run autoregressive inference for multiple initial conditions
     for i, ic in enumerate(ics):
+      t1 = time.time()
       logging.info("Initial condition {} of {}".format(i+1, n_ics))
-      sr, sp, vl, a, au, vc, ac, acu, accland, accsea = autoregressive_inference(params, ic, valid_data_full, model)
-
-      if i ==0 or len(valid_loss) == 0:
+      sr, sp, vl, a, au, tq = autoregressive_inference(params, ic, valid_data_full, valid_data_tp_full, model_wind, model)
+      if i == 0:
         seq_real = sr
         seq_pred = sp
         valid_loss = vl
-        valid_loss_coarse = vc
         acc = a
-        acc_coarse = ac
-        acc_coarse_unweighted = acu
         acc_unweighted = au
-        acc_land = accland
-        acc_sea = accsea
+        tqe = tq
       else:
 #        seq_real = np.concatenate((seq_real, sr), 0)
 #        seq_pred = np.concatenate((seq_pred, sp), 0)
         valid_loss = np.concatenate((valid_loss, vl), 0)
-        valid_loss_coarse = np.concatenate((valid_loss_coarse, vc), 0)
         acc = np.concatenate((acc, a), 0)
-        acc_coarse = np.concatenate((acc_coarse, ac), 0)
-        acc_coarse_unweighted = np.concatenate((acc_coarse_unweighted, acu), 0)
         acc_unweighted = np.concatenate((acc_unweighted, au), 0)
-        acc_land = np.concatenate((acc_land, accland), 0)
-        acc_sea = np.concatenate((acc_sea, accsea), 0)
+        tqe = np.concatenate((tqe, tq), 0)
+      t2 = time.time()-t1
+      print("time for 1 autoreg inference = ", t2)
 
     prediction_length = seq_real[0].shape[0]
     n_out_channels = seq_real[0].shape[1]
@@ -441,34 +404,18 @@ if __name__ == '__main__':
     with h5py.File(os.path.join(params['experiment_dir'], 'autoregressive_predictions'+ autoregressive_inference_filetag +'.h5'), 'a') as f:
       if vis:
         try:
-            f.create_dataset("ground_truth", data = seq_real, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
+          f.create_dataset("ground_truth", data = seq_real, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
         except: 
-            del f["ground_truth"]
-            f.create_dataset("ground_truth", data = seq_real, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
-            f["ground_truth"][...] = seq_real
+          del f["ground_truth"]
+          f.create_dataset("ground_truth", data = seq_real, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
+          f["ground_truth"][...] = seq_real
 
         try:
-            f.create_dataset("predicted", data = seq_pred, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
+          f.create_dataset("predicted", data = seq_pred, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
         except:
-            del f["predicted"]
-            f.create_dataset("predicted", data = seq_pred, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
-            f["predicted"][...]= seq_pred
-
-      if params.masked_acc:
-        try:
-          f.create_dataset("acc_land", data = acc_land)#, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-        except:
-          del f["acc_land"]
-          f.create_dataset("acc_land", data = acc_land)#, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-          f["acc_land"][...] = acc_land  
-
-        try:
-          f.create_dataset("acc_sea", data = acc_sea)#, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-        except:
-          del f["acc_sea"]
-          f.create_dataset("acc_sea", data = acc_sea)#, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-          f["acc_sea"][...] = acc_sea 
-
+          del f["predicted"]
+          f.create_dataset("predicted", data = seq_pred, shape = (n_ics, prediction_length, n_out_channels, img_shape_x, img_shape_y), dtype = np.float32)
+          f["predicted"][...]= seq_pred
 
       try:
         f.create_dataset("rmse", data = valid_loss, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
@@ -485,31 +432,17 @@ if __name__ == '__main__':
         f["acc"][...] = acc   
 
       try:
-        f.create_dataset("rmse_coarse", data = valid_loss_coarse, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-      except:
-        del f["rmse_coarse"]
-        f.create_dataset("rmse_coarse", data = valid_loss_coarse, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-        f["rmse_coarse"][...] = valid_loss_coarse
-
-      try:
-        f.create_dataset("acc_coarse", data = acc_coarse, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-      except:
-        del f["acc_coarse"]
-        f.create_dataset("acc_coarse", data = acc_coarse, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-        f["acc_coarse"][...] = acc_coarse
-
-      try:
         f.create_dataset("acc_unweighted", data = acc_unweighted, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
       except:
         del f["acc_unweighted"]
         f.create_dataset("acc_unweighted", data = acc_unweighted, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
         f["acc_unweighted"][...] = acc_unweighted     
-
+       
       try:
-        f.create_dataset("acc_coarse_unweighted", data = acc_coarse_unweighted, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
+        f.create_dataset("tqe", data = tqe, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
       except:
-        del f["acc_coarse_unweighted"]
-        f.create_dataset("acc_coarse_unweighted", data = acc_coarse_unweighted, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
-        f["acc_coarse_unweighted"][...] = acc_coarse_unweighted     
-        
-      f.close()
+        del f["tqe"]
+        f.create_dataset("tqe", data = tqe, shape = (n_ics, prediction_length, n_out_channels), dtype =np.float32)
+        f["tqe"][...] = tqe
+
+      f.close() 

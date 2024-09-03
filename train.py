@@ -532,9 +532,9 @@ class Trainer():
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument("--run_num", default='00', type=str)
-  parser.add_argument("--yaml_config", default='./config/AFNO.yaml', type=str)
-  parser.add_argument("--config", default='default', type=str)
+  parser.add_argument("--run_num", default='train_1', type=str)
+  parser.add_argument("--yaml_config", default='./config/AFNO_1.yaml', type=str)
+  parser.add_argument("--config", default='precip', type=str)
   parser.add_argument("--enable_amp", action='store_true')
   parser.add_argument("--epsilon_factor", default = 0, type = float)
 
@@ -585,7 +585,7 @@ if __name__ == '__main__':
   params['name'] = args.config + '_' + str(args.run_num)
   params['group'] = "era5_precip" + args.config
   params['project'] = "ERA5_precip"
-  params['entity'] = "flowgan"
+  params['entity'] = "zhejianglab132" #cdj
   if world_rank==0:
     logging_utils.log_to_file(logger_name=None, log_filename=os.path.join(expDir, 'out.log'))
     logging_utils.log_versions()

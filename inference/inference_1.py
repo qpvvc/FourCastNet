@@ -73,7 +73,9 @@ import glob
 from datetime import datetime
 
 
-fld = "z500" # diff flds have diff decor times and hence differnt ics
+# fld = "z500" # diff flds have diff decor times and hence differnt ics
+fld = "precip" #cdj
+
 if fld == "z500" or fld == "2m_temperature" or fld == "t850":
     DECORRELATION_TIME = 36 # 9 days (36) for z500, 2 (8 steps) days for u10, v10
 else:
@@ -325,14 +327,16 @@ if __name__ == '__main__':
       assert args.weights is not None, 'Must set --weights argument if using --override_dir'
       expDir = args.override_dir
     else:
-      assert args.weights is None, 'Cannot use --weights argument without also using --override_dir'
+    #   assert args.weights is None, 'Cannot use --weights argument without also using --override_dir'
       expDir = os.path.join(params.exp_dir, args.config, str(args.run_num))
 
     if not os.path.isdir(expDir):
       os.makedirs(expDir)
 
     params['experiment_dir'] = os.path.abspath(expDir)
-    params['best_checkpoint_path'] = args.weights if args.override_dir is not None else os.path.join(expDir, 'training_checkpoints/best_ckpt.tar')
+    # params['best_checkpoint_path'] = args.weights if args.override_dir is not None else os.path.join(expDir, 'training_checkpoints/best_ckpt.tar')
+    params['best_checkpoint_path'] = args.weights
+
     params['resuming'] = False
     params['local_rank'] = 0
 

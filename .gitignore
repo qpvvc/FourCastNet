@@ -15,3 +15,5 @@ utils/.ipynb_checkpoints/*
 ray_results
 *.pdf
 *.svg
+data_process/hdf5-1.10.4*
+results
