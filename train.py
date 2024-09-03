@@ -301,7 +301,8 @@ class Trainer():
       if self.world_rank == 0 and self.params.log_to_screen:
         if self.iters % 10 == 0:
           logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
-      
+      if self.iters > 10:
+        break
       tr_time += time.time() - tr_start
     
     try:
@@ -339,7 +340,8 @@ class Trainer():
     sample_idx = np.random.randint(len(self.valid_data_loader))
     with torch.no_grad():
       for i, data in enumerate(self.valid_data_loader, 0):
-        if (not self.precip) and i>=n_valid_batches:
+        # if (not self.precip) and i>=n_valid_batches:
+        if i>=n_valid_batches: #cdj
           break    
         inp, tar  = map(lambda x: x.to(self.device, dtype = torch.float), data)
         if self.params.orography and self.params.two_step_training:
@@ -401,7 +403,7 @@ class Trainer():
                 save_image(torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
         #cdj 
         if self.world_rank == 0 and self.params.log_to_screen:
-          if valid_steps % 1 == 0:
+          if valid_steps % 10 == 0:
             logging.info('Valid Iter: {}, Loss: {}'.format(i, valid_loss/valid_steps))
            
     if dist.is_initialized():
