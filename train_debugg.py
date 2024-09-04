@@ -243,7 +243,7 @@ class Trainer():
 
   def train_one_epoch(self):
     self.epoch += 1
-    tr_time = [0,0,0,0]
+    tr_time = [0,0,0,0,0,0]
     data_time = 0
     self.model.train()
     
@@ -292,12 +292,16 @@ class Trainer():
 
       if self.params.enable_amp:
         self.gscaler.scale(loss).backward()
+        tr_time[1] += time.time() - tr_start
+        
         self.gscaler.step(self.optimizer)
+        tr_time[2] += time.time() - tr_start
+        
       else:
         loss.backward()
         self.optimizer.step()
         
-      tr_time[1] += time.time() - tr_start
+      tr_time[3] += time.time() - tr_start
 
       if self.params.enable_amp:
         self.gscaler.update()
@@ -308,7 +312,7 @@ class Trainer():
           logs = {'loss': loss}
 
 
-      tr_time[2] += time.time() - tr_start
+      tr_time[4] += time.time() - tr_start
 
       #cdj
       if self.world_rank == 0 and self.params.log_to_screen:
@@ -323,11 +327,11 @@ class Trainer():
           if self.params.log_to_wandb:
             wandb.log(logs, step=self.iters)    
             
-      tr_time[3] += time.time() - tr_start
+      tr_time[5] += time.time() - tr_start
       
       if self.world_rank == 0 and self.params.log_to_screen:
         if self.iters % 5 == 0:        
-          logging.info('train data time={}, train step time={}'.format(data_time, tr_time))                            
+          logging.info('train data time={}, train step time={}'.format(data_time, tr_time[0], np.diff(tr_time)))                            
       #   cdj for debug
       if self.iters > 100: 
         break
