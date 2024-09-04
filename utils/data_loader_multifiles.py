@@ -169,8 +169,8 @@ class GetDataset(Dataset):
       if year_idx == 0:
         lim = 1458
         local_idx = local_idx%lim 
-        # inp_local_idx = local_idx + 2
-        inp_local_idx = local_idx #cdj        
+        inp_local_idx = local_idx + 2
+        # inp_local_idx = local_idx #cdj        
         tar_local_idx = local_idx
         step = 0 if tar_local_idx >= lim-self.dt else self.dt
 

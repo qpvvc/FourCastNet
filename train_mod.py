@@ -224,9 +224,9 @@ class Trainer():
         wandb.log({'lr': lr})
 
       if self.world_rank == 0:
-        if self.params.save_checkpoint:
+        # if self.params.save_checkpoint:
           #checkpoint at the end of every epoch
-          self.save_checkpoint(self.params.checkpoint_path)
+        #   self.save_checkpoint(self.params.checkpoint_path)
           if valid_logs['valid_loss'] <= best_valid_loss:
             #logging.info('Val loss improved from {} to {}'.format(best_valid_loss, valid_logs['valid_loss']))
             self.save_checkpoint(self.params.best_checkpoint_path)
@@ -287,8 +287,6 @@ class Trainer():
             else:
               gen = self.model(inp).to(self.device, dtype = torch.float)
             loss = self.loss_obj(gen, tar)
-            
-      tr_time[0] += time.time() - tr_start
 
       if self.params.enable_amp:
         self.gscaler.scale(loss).backward()
@@ -296,46 +294,51 @@ class Trainer():
       else:
         loss.backward()
         self.optimizer.step()
-        
-      tr_time[1] += time.time() - tr_start
 
       if self.params.enable_amp:
         self.gscaler.update()
-      
-      try:
-          logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
-      except:
-          logs = {'loss': loss}
+
+        try:
+            logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
+        except:
+            logs = {'loss': loss}
 
 
-      tr_time[2] += time.time() - tr_start
-
+                
       #cdj
       if self.world_rank == 0 and self.params.log_to_screen:
-        if self.iters % 5 == 0:
-          logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
-
-          # if dist.is_initialized():
-          #   for key in sorted(logs.keys()):
-          #     dist.all_reduce(logs[key].detach())
-          #     logs[key] = float(logs[key]/dist.get_world_size())
-              
-          if self.params.log_to_wandb:
-            wandb.log(logs, step=self.iters)    
-                            
-      #   cdj for debug
-      if self.iters > 100: 
-        break
+        if self.iters % 100 == 0:
+            logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
+         
+            # if dist.is_initialized():
+            #     for key in sorted(logs.keys()):
+            #         dist.all_reduce(logs[key].detach())
+            #         logs[key] = float(logs[key]/dist.get_world_size())
+                
+            if self.params.log_to_wandb:
+                wandb.log(logs, step=self.iters)   
+                 
+        if self.iters % 1000 == 0:
+            if self.params.save_checkpoint:
+                #checkpoint at the end of every epoch
+                self.save_checkpoint(self.params.checkpoint_path)
+                      
+      #cdj for debug
+      # if self.iters > 10: 
+        # break
         
-      tr_time[3] += time.time() - tr_start
+      tr_time += time.time() - tr_start
     
 
+
+    # if self.params.log_to_wandb:
+    #   wandb.log(logs, step=self.epoch)
 
     return tr_time, data_time, logs
 
   def validate_one_epoch(self):
     self.model.eval()
-    n_valid_batches = 10 #do validation on first 20 images, just for LR scheduler
+    n_valid_batches = 100 #do validation on first 20 images, just for LR scheduler
     if self.params.normalization == 'minmax':
         raise Exception("minmax normalization not supported")
     elif self.params.normalization == 'zscore':
@@ -417,7 +420,7 @@ class Trainer():
                 save_image(torch.cat((gen[0,0], torch.zeros((self.valid_dataset.img_shape_x, 4)).to(self.device, dtype = torch.float), tar[0,0]), axis = 1), params['experiment_dir'] + "/" + str(i) + "/" + str(self.epoch) + ".png")
         #cdj 
         if self.world_rank == 0 and self.params.log_to_screen:
-          if valid_steps % 5 == 0:
+          if valid_steps % 10 == 0:
             logging.info('Valid Iter: {}, Loss: {}'.format(valid_steps, valid_loss/valid_steps))
            
     if dist.is_initialized():

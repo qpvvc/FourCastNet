@@ -120,9 +120,9 @@ precip: &precip
   out_channels: [0]
   nettype: 'afno'
   nettype_wind: 'afno'
-  log_to_wandb: !!bool True #cdj
+  log_to_wandb: !!bool False #cdj
   lr: 2.5E-4
-  batch_size: 2 #cdj =4*num_gpus
+  batch_size: 32 #cdj =4*num_gpus
   max_epochs: 25
   precip: '/datasets/FourCastNet/FCN_ERA5_data_v0/precip'
   time_means_path_tp: '/datasets/FourCastNet/additional/stats_v0/precip/time_means.npy'
