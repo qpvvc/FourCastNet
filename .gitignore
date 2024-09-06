@@ -17,3 +17,4 @@ ray_results
 *.svg
 data_process/hdf5-1.10.4*
 results
+log

@@ -76,6 +76,9 @@ DECORRELATION_TIME = 36 # 9 days
 import json
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap as ruamelDict
+# from torch.profiler import schedule
+
+
 
 class Trainer():
   def count_parameters(self):
@@ -86,7 +89,20 @@ class Trainer():
     self.params = params
     self.world_rank = world_rank
     self.device = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-
+    
+    # #cdj 初始化 profiler
+    # self.profiler = torch.profiler.profile(
+    #     activities=[
+    #         torch.profiler.ProfilerActivity.CPU,
+    #         torch.profiler.ProfilerActivity.CUDA,
+    #     ],
+    #     schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+    #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True
+    # )
+    
     if params.log_to_wandb:
       wandb.init(config=params, name=params.name, group=params.group, project=params.project, entity=params.entity)
 
@@ -203,6 +219,9 @@ class Trainer():
 #        self.valid_sampler.set_epoch(epoch)
 
       start = time.time()
+      # print("start", start, "world_rank",self.world_rank)
+      # logging.info("log: start:{} world_rank {}".format(start, self.world_rank))
+            
       tr_time, data_time, train_logs = self.train_one_epoch()
       valid_time, valid_logs = self.validate_one_epoch()
       if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
@@ -214,9 +233,9 @@ class Trainer():
         self.scheduler.step(valid_logs['valid_loss'])
       elif self.params.scheduler == 'CosineAnnealingLR':
         self.scheduler.step()
-        if self.epoch >= self.params.max_epochs:
-          logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
-          exit()
+        # if self.epoch >= self.params.max_epochs:
+        #   logging.info("Terminating training after reaching params.max_epochs while LR scheduler is set to CosineAnnealingLR")
+        #   exit()
 
       if self.params.log_to_wandb:
         for pg in self.optimizer.param_groups:
@@ -239,13 +258,16 @@ class Trainer():
       if epoch==self.params.max_epochs-1 and self.params.prediction_type == 'direct':
          logging.info('Final Valid RMSE: Z500- {}. T850- {}, 2m_T- {}'.format(valid_weighted_rmse[0], valid_weighted_rmse[1], valid_weighted_rmse[2]))
 
-
+      if self.epoch >= self.params.max_epochs:
+        exit()
 
   def train_one_epoch(self):
     self.epoch += 1
     tr_time = [0,0,0,0,0,0]
     data_time = 0
     self.model.train()
+
+    # self.profiler.start()
     
     for i, data in enumerate(self.train_data_loader, 0):
       self.iters += 1
@@ -297,14 +319,12 @@ class Trainer():
         self.gscaler.step(self.optimizer)
         tr_time[2] += time.time() - tr_start
         
+        self.gscaler.update()
+        tr_time[3] += time.time() - tr_start
       else:
         loss.backward()
         self.optimizer.step()
         
-      tr_time[3] += time.time() - tr_start
-
-      if self.params.enable_amp:
-        self.gscaler.update()
       
       try:
           logs = {'loss': loss, 'loss_step_one': loss_step_one, 'loss_step_two': loss_step_two}
@@ -329,20 +349,23 @@ class Trainer():
             
       tr_time[5] += time.time() - tr_start
       
-      if self.world_rank == 0 and self.params.log_to_screen:
-        if self.iters % 5 == 0: 
+      # if self.params.log_to_screen:  #cdj only world_rank 0 is true      
+      if self.iters % 5 == 0: 
           diff_tr_time = np.diff(tr_time)
           diff_tr_time_str = ', '.join(['{:.6f}'.format(x) for x in diff_tr_time])       
-          logging.info('train data time={}, train step time={},{}'.format(data_time, tr_time[0], diff_tr_time_str))                            
+          logging.info('{}: train data time={}, train step time={},{}'.format(self.world_rank, data_time, tr_time[0], diff_tr_time_str))                            
       #cdj for debug
       if self.iters > 100: 
         break
+      # self.profiler.step()
       
+    # self.profiler.stop()
+    
     return tr_time, data_time, logs
 
   def validate_one_epoch(self):
     self.model.eval()
-    n_valid_batches = 10 #do validation on first 20 images, just for LR scheduler
+    n_valid_batches = 1 #do validation on first 20 images, just for LR scheduler
     if self.params.normalization == 'minmax':
         raise Exception("minmax normalization not supported")
     elif self.params.normalization == 'zscore':
@@ -640,7 +663,8 @@ if __name__ == '__main__':
       hparams[str(key)] = str(value)
     with open(os.path.join(expDir, 'hyperparams.yaml'), 'w') as hpfile:
       yaml.dump(hparams,  hpfile )
-
+      
+  params['max_epochs']  = 1 #cdj for debug
   trainer = Trainer(params, world_rank)
   trainer.train()
   logging.info('DONE ---- rank %d'%world_rank)
