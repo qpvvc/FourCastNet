@@ -120,7 +120,7 @@ precip: &precip
   out_channels: [0]
   nettype: 'afno'
   nettype_wind: 'afno'
-  log_to_wandb: !!bool False #cdj
+  log_to_wandb: !!bool True #cdj
   lr: 2.5E-4
   batch_size: 64 #cdj =4*num_gpus
   max_epochs: 25

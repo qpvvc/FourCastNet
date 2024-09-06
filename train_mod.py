@@ -310,10 +310,10 @@ class Trainer():
         if self.iters % 100 == 0:
             logging.info('Iter: {}, Loss: {}'.format(self.iters, loss.item()))
          
-            # if dist.is_initialized():
-            #     for key in sorted(logs.keys()):
-            #         dist.all_reduce(logs[key].detach())
-            #         logs[key] = float(logs[key]/dist.get_world_size())
+            if dist.is_initialized():
+                for key in sorted(logs.keys()):
+                    dist.all_reduce(logs[key].detach())
+                    logs[key] = float(logs[key]/dist.get_world_size())
                 
             if self.params.log_to_wandb:
                 wandb.log(logs, step=self.iters)   
