@@ -330,15 +330,14 @@ class Trainer():
       tr_time[5] += time.time() - tr_start
       
       if self.world_rank == 0 and self.params.log_to_screen:
-        if self.iters % 5 == 0:        
-          logging.info('train data time={}, train step time={},{}'.format(data_time, tr_time[0], np.diff(tr_time)))                            
-      #   cdj for debug
+        if self.iters % 5 == 0: 
+          diff_tr_time = np.diff(tr_time)
+          diff_tr_time_str = ', '.join(['{:.6f}'.format(x) for x in diff_tr_time])       
+          logging.info('train data time={}, train step time={},{}'.format(data_time, tr_time[0], diff_tr_time_str))                            
+      #cdj for debug
       if self.iters > 100: 
         break
-        
-    
-
-
+      
     return tr_time, data_time, logs
 
   def validate_one_epoch(self):
