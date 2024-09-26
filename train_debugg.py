@@ -289,7 +289,7 @@ class Trainer():
 
       tr_start = time.time()
 
-      self.model.zero_grad()
+      self.model.zero_grad()  #cdj 梯度清零
       if self.params.two_step_training:
           with amp.autocast(self.params.enable_amp):
             gen_step_one = self.model(inp).to(self.device, dtype = torch.float)
@@ -307,8 +307,8 @@ class Trainer():
                 inp = self.model_wind(inp).to(self.device, dtype = torch.float)
               gen = self.model(inp.detach()).to(self.device, dtype = torch.float)
             else:
-              gen = self.model(inp).to(self.device, dtype = torch.float)
-            loss = self.loss_obj(gen, tar)
+              gen = self.model(inp).to(self.device, dtype = torch.float)  #cdj forward
+            loss = self.loss_obj(gen, tar) #cdj compute loss
             
       tr_time[0] += time.time() - tr_start
 
@@ -585,9 +585,9 @@ class Trainer():
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument("--run_num", default='train_1', type=str)
+  parser.add_argument("--run_num", default='train_2', type=str)
   parser.add_argument("--yaml_config", default='./config/AFNO_1.yaml', type=str)
-  parser.add_argument("--config", default='precip', type=str)
+  parser.add_argument("--config", default='afno_backbone', type=str)
   parser.add_argument("--enable_amp", action='store_true')
   parser.add_argument("--epsilon_factor", default = 0, type = float)
 
